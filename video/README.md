@@ -1,6 +1,13 @@
 # elevens1 — dikey Shorts/Reels videosu
 
-`out/elevens1_shorts.mp4` — 1080x1920, 30 fps, 47 sn, H.264 + AAC (-15 LUFS).
+İki tema, aynı seslendirme:
+
+| Dosya | Tema | Betik |
+|---|---|---|
+| `out/elevens1_shorts.mp4` | Koyu, enerjik: neon vurgular, glitch/whip/flaş geçişler, ritimli müzik | `render.py` |
+| `out/elevens1_shorts_soft.mp4` | Yumuşak, sade: krem kâğıt zemin, pastel tonlar, beyaz kartlar, yavaş solmalar, müzik kutusu | `render_soft.py` |
+
+Her ikisi de 1080x1920, 30 fps, 47 sn, H.264 + AAC.
 
 Tüm görseller kod ile üretilir (stok görsel yok). Akış:
 
@@ -12,5 +19,6 @@ Tüm görseller kod ile üretilir (stok görsel yok). Akış:
 pip install numpy pillow
 python3 align.py                    # words.json
 python3 render.py                   # out/elevens1_shorts.mp4
+python3 render_soft.py              # out/elevens1_shorts_soft.mp4
 python3 render.py --preview 4.5 20  # tek kare PNG önizleme
 ```

@@ -157,27 +157,64 @@ def add(buf, snd, t, gain):
     buf[i:i + m] += snd[:m] * gain
 
 
-def build_mix(audio, dur, fps, words, out_path):
-    voice = load(audio)
-    n = int(dur * SR)
-    v = np.zeros(n, np.float32)
-    v[:len(voice)] = voice[:n]
-    v *= 0.9 / (np.abs(v).max() + 1e-6)
-
+def word_finder(words):
     def wt(w, after=0.0):
         for x in words:
             if x["s"] >= after - 1e-3 and x["w"].lower().strip("“”,.!?:").startswith(w):
                 return x["s"]
         raise KeyError(w)
+    return wt
 
-    # sidechain: sese göre müziği kıs
+
+def prep_voice(audio, dur, depth=0.55):
+    """Seslendirmeyi normalize eder; müzik için sidechain kısma eğrisini döndürür."""
+    voice = load(audio)
+    n = int(dur * SR)
+    v = np.zeros(n, np.float32)
+    v[:len(voice)] = voice[:n]
+    v *= 0.9 / (np.abs(v).max() + 1e-6)
     e = np.sqrt(np.convolve(v ** 2, np.ones(2048) / 2048, "same"))
-    duck = 1 - 0.55 * np.clip(e / 0.08, 0, 1)
-    duck = onepole_lp(duck.astype(np.float32), 0.0015)
+    duck = 1 - depth * np.clip(e / 0.08, 0, 1)
+    return v, onepole_lp(duck.astype(np.float32), 0.0015)
+
+
+def fade_edges(x, fin=0.3, fout=0.8):
+    n = len(x)
+    return x * np.clip(np.arange(n) / (fin * SR), 0, 1) * np.clip((n - np.arange(n)) / (fout * SR), 0, 1)
+
+
+def finish(v, music, fx, out_path, dur, fps):
+    """Miksi wav'a yazar, kare başına yumuşatılmış ses enerjisini döndürür."""
+    mixd = v + music + fx * 0.9
+    peak = np.abs(mixd).max()
+    if peak > 0.98:
+        mixd = np.tanh(mixd / peak * 1.2) / np.tanh(1.2) * 0.98
+    pcm = (np.clip(mixd, -1, 1) * 32767).astype(np.int16)
+    with wave.open(out_path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(pcm.tobytes())
+
+    hop = SR // fps
+    nf = int(dur * fps)
+    fe = np.array([np.sqrt(np.mean(v[i * hop:(i + 1) * hop] ** 2) + 1e-9) for i in range(nf)])
+    fe = fe / (fe.max() + 1e-9)
+    sm = np.zeros_like(fe)
+    acc = 0.0
+    for i, x in enumerate(fe):
+        acc += (0.5 if x > acc else 0.12) * (x - acc)
+        sm[i] = acc
+    return out_path, sm
+
+
+def build_mix(audio, dur, fps, words, out_path):
+    v, duck = prep_voice(audio, dur)
+    n = len(v)
+    wt = word_finder(words)
 
     music = pad(n) * 0.11 + beat(n, 100, [(31.0, 32.3), (45.4, 99)]) * 0.10
-    music *= np.clip(np.arange(n) / (0.3 * SR), 0, 1) * np.clip((n - np.arange(n)) / (0.8 * SR), 0, 1)
-    music *= duck
+    music = fade_edges(music) * duck
 
     fx = np.zeros(n, np.float32)
     # sahne 1
@@ -234,25 +271,106 @@ def build_mix(audio, dur, fps, words, out_path):
     add(fx, boom(1.8), g - 0.05 + 0.15, 0.75)
     add(fx, ding(880, 1.2), 45.9, 0.18)
 
-    mixd = v + music + fx * 0.9
-    peak = np.abs(mixd).max()
-    if peak > 0.98:
-        mixd = np.tanh(mixd / peak * 1.2) / np.tanh(1.2) * 0.98
-    pcm = (np.clip(mixd, -1, 1) * 32767).astype(np.int16)
-    with wave.open(out_path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SR)
-        w.writeframes(pcm.tobytes())
+    return finish(v, music, fx, out_path, dur, fps)
 
-    # kare başına ses enerjisi (arka plan nabzı için)
-    hop = SR // fps
-    nf = int(dur * fps)
-    fe = np.array([np.sqrt(np.mean(v[i * hop:(i + 1) * hop] ** 2) + 1e-9) for i in range(nf)])
-    fe = fe / (fe.max() + 1e-9)
-    sm = np.zeros_like(fe)
-    acc = 0.0
-    for i, x in enumerate(fe):
-        acc += (0.5 if x > acc else 0.12) * (x - acc)
-        sm[i] = acc
-    return out_path, sm
+
+# ---------------------------------------------------------------- yumuşak tema
+SOFT_CHORDS = [
+    (0.0, ["C4", "E4", "G4", "B3"]),
+    (5.55, ["A3", "C4", "E4", "G4"]),
+    (11.35, ["F3", "A3", "C4", "E4"]),
+    (25.45, ["C4", "E4", "G4", "D4"]),
+    (31.0, ["D4", "F4", "A3", "C4"]),
+    (39.4, ["F3", "A3", "C4", "G4"]),
+    (43.6, ["C4", "E4", "G4", "B3"]),
+]
+
+
+def soft_pad(n):
+    """Saf sinüslerden sıcak, hafif bir pad."""
+    t = np.arange(n) / SR
+    out = np.zeros(n, np.float32)
+    bounds = [int(c[0] * SR) for c in SOFT_CHORDS] + [n]
+    xf = int(1.2 * SR)
+    for k, (_, notes) in enumerate(SOFT_CHORDS):
+        a, b = max(0, bounds[k] - xf // 2), min(n, bounds[k + 1] + xf // 2)
+        tt = t[a:b]
+        seg = np.zeros(b - a, np.float32)
+        for nn in notes:
+            f = NOTE[nn]
+            seg += np.sin(2 * np.pi * f * tt) + 0.25 * np.sin(2 * np.pi * f * 2 * tt + 0.5)
+            seg += 0.5 * np.sin(2 * np.pi * f * 1.003 * tt)
+        w = np.ones(b - a, np.float32)
+        r = np.linspace(0, 1, min(xf, b - a))
+        w[:len(r)] = np.minimum(w[:len(r)], r)
+        w[-len(r):] = np.minimum(w[-len(r):], r[::-1])
+        out[a:b] += seg * w
+    out *= 0.8 + 0.2 * np.sin(2 * np.pi * 0.15 * t)
+    return out / np.abs(out).max()
+
+
+def pluck(f, d=1.6):
+    """Müzik kutusu / keçeli piyano benzeri yumuşak nota."""
+    n = int(d * SR)
+    t = np.arange(n) / SR
+    x = np.sin(2 * np.pi * f * t) + 0.3 * np.sin(2 * np.pi * f * 2 * t) * np.exp(-t * 6)
+    return x * env(n, 0.006, d / 4)
+
+
+def soft_plucks(n, bpm=76):
+    out = np.zeros(n, np.float32)
+    step = 60 / bpm
+    k = 0
+    while k * step * SR < n:
+        t0 = k * step
+        notes = SOFT_CHORDS[0][1]
+        for c0, nn in SOFT_CHORDS:
+            if t0 >= c0:
+                notes = nn
+        f = NOTE[notes[k % len(notes)]] * 2
+        add(out, pluck(f), t0, 0.5 if k % 2 == 0 else 0.3)
+        k += 1
+    return out
+
+
+def soft_whoosh(d=0.7):
+    return onepole_lp(whoosh(d).astype(np.float32), 0.25)
+
+
+def build_mix_soft(audio, dur, fps, words, out_path):
+    v, duck = prep_voice(audio, dur, depth=0.6)
+    n = len(v)
+    wt = word_finder(words)
+
+    music = soft_pad(n) * 0.09 + soft_plucks(n) * 0.05
+    music = fade_edges(music, 0.8, 1.5) * duck
+
+    fx = np.zeros(n, np.float32)
+    add(fx, pop(500, 750, 0.12), 0.05, 0.14)
+    add(fx, pop(450, 650, 0.12), 0.4, 0.12)
+    for k in range(40):
+        add(fx, click(), 0.75 + k * (1.85 / 40), 0.04)
+    add(fx, ding(1046, 0.8), 2.85, 0.10)
+    add(fx, pop(420, 300, 0.16), 4.4, 0.16)
+    add(fx, ding(784, 0.8), 4.85, 0.08)
+    for tb in (5.55, 11.35, 25.45, 31.0, 39.4):
+        add(fx, soft_whoosh(0.7), tb - 0.4, 0.22)
+    sc = wt("sana")
+    add(fx, pop(500, 700, 0.12), sc - 0.1, 0.14)
+    add(fx, ding(1318, 0.5), wt("basit"), 0.07)
+    add(fx, ding(1568, 0.5), wt("etkili"), 0.07)
+    add(fx, pop(500, 750, 0.12), wt("cümleyi") - 0.1, 0.14)
+    for x in words:
+        if 5 <= x["seg"] <= 8:
+            L = len(x["w"])
+            for c in range(L):
+                add(fx, click(), x["s"] + (x["e"] - x["s"]) * 0.8 * c / L, 0.025)
+    for k in range(3):
+        add(fx, pop(500 + k * 120, 700 + k * 120, 0.12), 25.8 + k * 0.6, 0.12)
+    add(fx, pop(380, 300, 0.2), 31.05, 0.18)
+    oz = wt("özellikle")
+    for i, cue in enumerate(("güvenilir", "kaynaklardan", "kontrol")):
+        add(fx, ding(1046 * (1.125 ** i), 0.7), wt(cue, oz), 0.08)
+    add(fx, ding(1046, 1.2), wt("gelmez", 40), 0.10)
+    add(fx, ding(1568, 1.4), wt("gelmez", 40) + 0.12, 0.06)
+    return finish(v, music, fx, out_path, dur, fps)
