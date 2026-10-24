@@ -183,12 +183,57 @@ def fade_edges(x, fin=0.3, fout=0.8):
     return x * np.clip(np.arange(n) / (fin * SR), 0, 1) * np.clip((n - np.arange(n)) / (fout * SR), 0, 1)
 
 
+def loudness(x):
+    """ffmpeg ebur128 ile (entegre LUFS, en yüksek kısa süreli LUFS) ölçer."""
+    import re
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".wav") as tf:
+        with wave.open(tf.name, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+        err = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", tf.name, "-af", "ebur128", "-f", "null",
+                              "-"], capture_output=True, text=True).stderr
+    st = [float(m) for m in re.findall(r"S:\s*(-?[\d.]+)", err)]
+    integ = float(re.findall(r"I:\s+(-?[\d.]+) LUFS", err)[-1])
+    return integ, max(st) if st else -70.0
+
+
+# Seviye kuralları (konuşmaya göre, LU): efektler ve müzik sesi asla bastırmasın.
+FX_REL, FX_PEAK_REL = -20.0, -10.0     # efekt: entegre -20, en gürültülü anı bile konuşmanın 10 altında
+MUSIC_REL, MUSIC_PEAK_REL = -17.0, -9.0
+TARGET_LUFS = -14.0
+
+
+def fit_level(x, ref_i, rel, peak_rel, name):
+    if not np.any(x):
+        return x
+    i, st = loudness(x)
+    g_db = min(ref_i + rel - i, ref_i + peak_rel - st)
+    y = x * 10 ** (g_db / 20)
+    print(f"  {name:6s}: {i:6.1f} LUFS (kısa süreli maks {st:6.1f}) -> kazanç {g_db:+5.1f} dB "
+          f"=> konuşmanın {i + g_db - ref_i:+5.1f} LU altında")
+    return y
+
+
 def finish(v, music, fx, out_path, dur, fps):
-    """Miksi wav'a yazar, kare başına yumuşatılmış ses enerjisini döndürür."""
-    mixd = v + music + fx * 0.9
-    peak = np.abs(mixd).max()
-    if peak > 0.98:
-        mixd = np.tanh(mixd / peak * 1.2) / np.tanh(1.2) * 0.98
+    """Katmanları ölçüp kurallara göre dengeler, sabit kazançla -14 LUFS'a getirir, wav yazar.
+    Kare başına yumuşatılmış ses enerjisini döndürür."""
+    vi, _ = loudness(v)
+    print(f"ses dengesi (konuşma {vi:.1f} LUFS):")
+    music = fit_level(music, vi, MUSIC_REL, MUSIC_PEAK_REL, "müzik")
+    fx = fit_level(fx, vi, FX_REL, FX_PEAK_REL, "efekt")
+    mixd = v + music + fx
+    mi, _ = loudness(mixd)
+    mixd = mixd * 10 ** ((TARGET_LUFS - mi) / 20)
+    # yumuşak tepe sınırlayıcı (~ -2.5 dBFS; AAC sonrası taşmasın); sabit kazanç, sessiz anlar şişirilmez
+    lim = 10 ** (-2.5 / 20)
+    over = np.abs(mixd) > lim * 0.8
+    if over.any():
+        k = lim * 0.8
+        mixd = np.where(over, np.sign(mixd) * (k + (lim - k) * np.tanh((np.abs(mixd) - k) / (lim - k))), mixd)
+    print(f"  miks  : {loudness(mixd)[0]:.1f} LUFS, tepe {20 * np.log10(np.abs(mixd).max()):.1f} dBFS")
     pcm = (np.clip(mixd, -1, 1) * 32767).astype(np.int16)
     with wave.open(out_path, "wb") as w:
         w.setnchannels(1)

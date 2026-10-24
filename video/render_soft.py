@@ -592,7 +592,7 @@ def main():
                            "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", mix_path,
                            "-c:v", "libx264", "-preset", "slow", "-crf", "21", "-maxrate", "12M", "-bufsize", "24M",
                            "-pix_fmt", "yuv420p", "-profile:v", "high",
-                           "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "48000",
+                           "-ar", "48000",
                            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
                            "-shortest", OUT], stdin=subprocess.PIPE)
     with Pool(os.cpu_count()) as pool:
